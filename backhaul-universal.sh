@@ -106,19 +106,26 @@ confirm() {
 }
 
 # select_choice <resultvar> <title> <option1> [option2] ...
+# NOTE: the input variable below is deliberately named "_sc_input" (not
+# "choice") so it can never collide with a caller passing a result
+# variable literally named "choice" (pick_port does this) -- with
+# bash's dynamic scoping, `printf -v "$__var"` resolves to the nearest
+# variable of that name, which would otherwise be this function's own
+# local instead of the caller's, silently discarding the selection (or,
+# on some bash builds, tripping "unbound variable" under `set -u`).
 select_choice() {
   local __var="$1" title="$2"; shift 2
   local -a opts=("$@")
-  local i choice
+  local i _sc_input
   echo
   info "$title"
   for i in "${!opts[@]}"; do
     printf "  %d) %s\n" "$((i + 1))" "${opts[$i]}"
   done
   while true; do
-    read -r -p "Choose [1-${#opts[@]}]: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#opts[@]})); then
-      printf -v "$__var" '%s' "$choice"
+    read -r -p "Choose [1-${#opts[@]}]: " _sc_input
+    if [[ "$_sc_input" =~ ^[0-9]+$ ]] && ((_sc_input >= 1 && _sc_input <= ${#opts[@]})); then
+      printf -v "$__var" '%s' "$_sc_input"
       return
     fi
     warn "Invalid choice."
@@ -237,39 +244,39 @@ auto_pick_port() {
 # pick_port <resultvar> <label> <default> [mode: any|cf-https|cf-http]
 pick_port() {
   local __var="$1" label="$2" default="$3" mode="${4:-any}"
-  local choice port allowed_desc="" allowed_list=""
+  local _pp_choice _pp_port allowed_desc="" allowed_list=""
   case "$mode" in
     cf-https) allowed_desc=" (Cloudflare-proxied HTTPS ports only)"; allowed_list=" 443 2053 2083 2087 2096 8443 " ;;
     cf-http)  allowed_desc=" (Cloudflare-proxied HTTP ports only)";  allowed_list=" 80 8080 8880 2052 2082 2086 2095 " ;;
   esac
   echo
   printf "%s%s\n" "$label" "$allowed_desc"
-  select_choice choice "Port selection" \
+  select_choice _pp_choice "Port selection" \
     "Auto — find the best free port for me (recommended)" \
     "Manual — I'll type the port"
-  if [[ "$choice" == "1" ]]; then
-    port="$(auto_pick_port "$mode")" || die "Could not find a free port automatically. Try manual selection."
-    ok "Auto-selected port: ${port}"
+  if [[ "$_pp_choice" == "1" ]]; then
+    _pp_port="$(auto_pick_port "$mode")" || die "Could not find a free port automatically. Try manual selection."
+    ok "Auto-selected port: ${_pp_port}"
   else
     while true; do
-      read -r -p "Enter port [${default}]: " port
-      port="${port:-$default}"
-      if ! valid_port "$port"; then
+      read -r -p "Enter port [${default}]: " _pp_port
+      _pp_port="${_pp_port:-$default}"
+      if ! valid_port "$_pp_port"; then
         warn "Enter a number from 1 to 65535."
         continue
       fi
-      if [[ -n "$allowed_list" ]] && [[ "$allowed_list" != *" ${port} "* ]]; then
+      if [[ -n "$allowed_list" ]] && [[ "$allowed_list" != *" ${_pp_port} "* ]]; then
         warn "That port is not in Cloudflare's proxied list:${allowed_list}"
         continue
       fi
-      if ! is_port_free "$port"; then
-        warn "Port ${port} is already in use. Choose another."
+      if ! is_port_free "$_pp_port"; then
+        warn "Port ${_pp_port} is already in use. Choose another."
         continue
       fi
       break
     done
   fi
-  printf -v "$__var" '%s' "$port"
+  printf -v "$__var" '%s' "$_pp_port"
 }
 
 backup_existing() {
