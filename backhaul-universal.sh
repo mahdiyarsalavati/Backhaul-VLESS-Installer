@@ -410,12 +410,13 @@ EOF
 # ----------------------------------------------------------------- xray --
 
 install_xray() {
-  if [[ -x "$XRAY_BIN" ]]; then
-    ok "Xray already installed: $("$XRAY_BIN" version 2>&1 | head -n1)"
-    return
-  fi
-  info "Installing Xray-core (official XTLS installer)..."
-  bash -c "$(curl -fL "$XRAY_INSTALL_URL")" @ install || die "Xray installation failed."
+  # -u root: the official installer defaults to running Xray as the
+  # unprivileged "nobody" user, which cannot read our chmod 600 config
+  # (it holds the REALITY private key). Always (re)install as root so
+  # an existing "nobody"-owned install gets repaired too -- this is
+  # idempotent and safe to re-run.
+  info "Installing/updating Xray-core (official XTLS installer, running as root)..."
+  bash -c "$(curl -fL "$XRAY_INSTALL_URL")" @ install -u root || die "Xray installation failed."
   [[ -x "$XRAY_BIN" ]] || die "Xray binary not found after installation."
 
   mkdir -p /etc/systemd/system/xray.service.d
