@@ -502,26 +502,81 @@ generate_self_signed_cert() {
   ok "Self-signed certificate generated for ${domain} (valid 10 years)."
 }
 
+# ------------------------------------------------------------ vless url --
+# We never ask the user to hand-build or hand-edit a VLESS URL. Instead we
+# parse whatever URL an inbound already produces (its query string carries
+# the security/type/flow parameters, whatever they are -- reality, tls,
+# none, ws, grpc...) and, on the Iran side, splice in the relay's own
+# host:port while leaving everything else byte-for-byte untouched.
+
+# parse_vless_url <url> <uuidvar> <portvar> <suffixvar>
+# suffix = everything after uuid@host:port, with any #fragment stripped
+# (the Iran step attaches its own remark).
+# NOTE: every local below is prefixed "_pvu_" so a caller can pass ANY
+# result-variable name -- including "uuid" or "suffix", which real call
+# sites do -- without it colliding with this function's own locals under
+# bash's dynamic scoping (the same pitfall fixed earlier in select_choice;
+# see the comment there).
+parse_vless_url() {
+  local __uuid="$2" __port="$3" __suffix="$4"
+  local _pvu_url="$1"
+  [[ "$_pvu_url" == vless://* ]] || return 1
+
+  local _pvu_rest _pvu_uuid _pvu_host_port_and_tail _pvu_host_port _pvu_tail _pvu_port _pvu_suffix
+  _pvu_rest="${_pvu_url#vless://}"
+  [[ "$_pvu_rest" == *@* ]] || return 1
+  _pvu_uuid="${_pvu_rest%%@*}"
+  _pvu_host_port_and_tail="${_pvu_rest#*@}"
+  [[ -n "$_pvu_uuid" && -n "$_pvu_host_port_and_tail" ]] || return 1
+
+  if [[ "$_pvu_host_port_and_tail" =~ ^([^/?#]+)(.*)$ ]]; then
+    _pvu_host_port="${BASH_REMATCH[1]}"
+    _pvu_tail="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  [[ -n "$_pvu_host_port" ]] || return 1
+
+  if [[ "$_pvu_host_port" == \[*\]:* ]]; then
+    _pvu_port="${_pvu_host_port##*]:}"
+  elif [[ "$_pvu_host_port" == *:* ]]; then
+    _pvu_port="${_pvu_host_port##*:}"
+  else
+    return 1
+  fi
+  valid_port "$_pvu_port" || return 1
+
+  _pvu_suffix="${_pvu_tail%%#*}"
+
+  printf -v "$__uuid" '%s' "$_pvu_uuid"
+  printf -v "$__port" '%s' "$_pvu_port"
+  printf -v "$__suffix" '%s' "$_pvu_suffix"
+  return 0
+}
+
 # --------------------------------------------------------------- bundle --
 # A tiny, versioned, base64 envelope carrying the foreign server's VLESS
-# credentials so the Iran step never has to ask the user to hand-build a
-# VLESS URL.
+# credentials (uuid, local port, and the URL's query-string tail, verbatim)
+# so the Iran step never has to ask the user to hand-build a VLESS URL.
+# Fields are joined with an ASCII unit separator (0x1F), not "|", so an
+# arbitrary query string can never be misread as a field boundary.
+
+BUNDLE_SEP=$'\x1f'
 
 encode_bundle() {
-  printf 'BHV1|%s|%s|%s|%s|%s' "$1" "$2" "$3" "$4" "$5" | openssl base64 -A
+  printf 'BHV2%s%s%s%s%s%s' "$BUNDLE_SEP" "$1" "$BUNDLE_SEP" "$2" "$BUNDLE_SEP" "$3" | openssl base64 -A
 }
 
 decode_bundle() {
   local raw
-  raw="$(printf '%s' "$1" | tr -d '[:space:]' | openssl base64 -d -A 2>/dev/null)" || return 1
-  [[ "$raw" == BHV1\|* ]] || return 1
+  raw="$(printf '%s' "$1" | tr -d '[:space:]\r\n' | openssl base64 -d -A 2>/dev/null)" || return 1
+  [[ "$raw" == "BHV2${BUNDLE_SEP}"* ]] || return 1
   printf '%s' "$raw"
 }
 
 build_vless_url() {
-  local uuid="$1" hostport_str="$2" pbk="$3" sid="$4" sni="$5" remark="$6"
-  printf 'vless://%s@%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s' \
-    "$uuid" "$hostport_str" "$sni" "$pbk" "$sid" "$remark"
+  local uuid="$1" hostport_str="$2" suffix="$3" remark="$4"
+  printf 'vless://%s@%s%s#%s' "$uuid" "$hostport_str" "$suffix" "$remark"
 }
 
 show_dns_record() {
@@ -579,40 +634,46 @@ choose_transport() {
 # ----------------------------------------------------- foreign / exit -----
 
 setup_foreign_exit() {
-  page "Foreign server — VLESS (REALITY) exit node" "STEP 1 of 3"
+  page "Foreign server — VLESS exit node" "STEP 1 of 3"
   cat <<'EOF'
-This server needs a VLESS + REALITY inbound that only listens on
-127.0.0.1 -- it stays unreachable from the internet until Step 2 (Iran)
-and Step 3 (connect this server) are done.
+This server needs a VLESS inbound that only listens on 127.0.0.1 -- it
+stays unreachable from the internet until Step 2 (Iran) and Step 3
+(connect this server) are done.
 EOF
   echo
   local mode_choice
   select_choice mode_choice "How do you want to set this up?" \
-    "I already have a VLESS+REALITY inbound (e.g. from 3x-ui/x-ui) — just enter its details" \
-    "Build a new one for me (installs Xray-core)"
+    "I already have a VLESS inbound (e.g. from 3x-ui/x-ui) — paste its VLESS URL" \
+    "Build a new one for me (installs Xray-core, VLESS+REALITY)"
 
   install_packages
 
-  local uuid priv="" pub sid sni local_port
+  local uuid suffix local_port
 
   if [[ "$mode_choice" == "1" ]]; then
-    page "Enter your existing inbound's details" "STEP 1 of 3"
+    page "Paste your existing VLESS URL" "STEP 1 of 3"
     cat <<'EOF'
-Nothing will be installed or changed on this server. Open the inbound in
-your panel (e.g. 3x-ui) and copy these fields. If it currently listens
-on 0.0.0.0 (publicly), change its "Listen IP" to 127.0.0.1 so traffic
-only arrives through the Iran relay tunnel you'll set up in Step 2.
+Nothing will be installed or changed on this server. In your panel (e.g.
+3x-ui), open the inbound and copy its share link / QR link — it looks
+like:
+
+  vless://<uuid>@<host>:<port>/?type=tcp&security=...&...#<remark>
+
+If the inbound currently listens on 0.0.0.0 (publicly), change its
+"Listen IP" to 127.0.0.1 first, so traffic only arrives through the
+Iran relay tunnel you'll set up in Step 2. Whatever security type it
+uses (reality, tls, none, ws, ...) is preserved exactly as-is.
 EOF
     echo
-    prompt_nonempty uuid "Client UUID"
-    prompt_nonempty pub "REALITY public key (pbk)"
-    prompt_nonempty sid "REALITY short ID (sid)"
+    local url parsed_port
     while true; do
-      read -r -p "SNI / camouflage domain (dest / serverNames): " sni
-      toml_safe_host "$sni" && break
-      warn "Enter a plain domain name (no quotes, backslashes, or blank)."
+      read -r -p "VLESS URL: " url
+      if parse_vless_url "$url" uuid parsed_port suffix; then
+        break
+      fi
+      warn "That doesn't look like a valid vless:// URL. Expected: vless://uuid@host:port/...#remark"
     done
-    prompt_port local_port "Local port this inbound listens on"
+    prompt_port local_port "Local port this inbound listens on" "$parsed_port"
     ok "Using your existing inbound — nothing installed."
   else
     if [[ -f "$XRAY_CONF" ]]; then
@@ -631,7 +692,7 @@ EOF
     install_xray
 
     page "Choose a REALITY camouflage site" "STEP 1 of 3"
-    local site_choice
+    local site_choice sni
     select_choice site_choice "Which real HTTPS site should REALITY impersonate?" \
       "www.microsoft.com (recommended)" \
       "www.amazon.com" \
@@ -655,9 +716,11 @@ EOF
     pick_port local_port "Xray local port" "8443" any
 
     info "Generating credentials..."
+    local priv pub sid
     uuid="$("$XRAY_BIN" uuid)"
     read -r priv pub <<< "$(xray_x25519)"
     sid="$(openssl rand -hex 8)"
+    suffix="?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&type=tcp&flow=xtls-rprx-vision"
 
     write_xray_reality_config "$uuid" "$priv" "$sid" "$sni" "$local_port"
 
@@ -674,28 +737,23 @@ EOF
   tune_kernel
 
   local bundle
-  bundle="$(encode_bundle "$uuid" "$pub" "$sid" "$sni" "$local_port")"
+  bundle="$(encode_bundle "$uuid" "$local_port" "$suffix")"
 
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/foreign-exit.env" <<EOF
 UUID="${uuid}"
-PRIVATE_KEY="${priv}"
-PUBLIC_KEY="${pub}"
-SHORT_ID="${sid}"
-SNI="${sni}"
 LOCAL_PORT="${local_port}"
+SUFFIX="${suffix}"
 BUNDLE="${bundle}"
 EOF
   chmod 600 "$CONF_DIR/foreign-exit.env"
 
   page "Foreign exit node ready" "STEP 1 of 3 — done"
-  ok "VLESS + REALITY details are ready."
+  ok "VLESS details are ready."
   echo
   printf "UUID:        %s\n" "$uuid"
-  printf "Public key:  %s\n" "$pub"
-  printf "Short ID:    %s\n" "$sid"
-  printf "SNI:         %s\n" "$sni"
   printf "Local port:  %s\n" "$local_port"
+  printf "Query/type:  %s\n" "$suffix"
   echo
   ok "Foreign bundle — copy this whole line to the Iran server (Step 2):"
   echo
@@ -830,20 +888,25 @@ EOF
   install_backhaul
 
   page "Foreign bundle" "STEP 2 of 3"
-  local bundle raw uuid pub sid sni local_port _tag
-  echo "Paste the bundle from Step 1, or leave empty to enter values manually."
+  local bundle raw uuid suffix local_port _tag
+  echo "Paste the bundle from Step 1, or leave empty to paste the foreign"
+  echo "server's VLESS URL directly instead."
   read -r -p "Bundle: " bundle
   if [[ -n "$bundle" ]]; then
     raw="$(decode_bundle "$bundle")" || die "That bundle could not be read — check you copied the whole line."
-    IFS='|' read -r _tag uuid pub sid sni local_port <<< "$raw"
+    IFS="$BUNDLE_SEP" read -r _tag uuid local_port suffix <<< "$raw"
   else
-    read -r -p "Foreign UUID: " uuid
-    read -r -p "Foreign REALITY public key: " pub
-    read -r -p "Foreign REALITY short ID: " sid
-    read -r -p "Foreign REALITY SNI (camouflage domain): " sni
-    prompt_port local_port "Foreign local Xray port" "8443"
+    local url parsed_port
+    while true; do
+      read -r -p "Foreign VLESS URL: " url
+      if parse_vless_url "$url" uuid parsed_port suffix; then
+        break
+      fi
+      warn "That doesn't look like a valid vless:// URL. Expected: vless://uuid@host:port/...#remark"
+    done
+    prompt_port local_port "Foreign local Xray port" "$parsed_port"
   fi
-  [[ -n "$uuid" && -n "$pub" && -n "$sid" && -n "$sni" && -n "$local_port" ]] || die "Missing bundle fields."
+  [[ -n "$uuid" && -n "$local_port" ]] || die "Missing bundle fields."
 
   page "Tunnel transport" "STEP 2 of 3"
   local TRANSPORT="" DOMAIN="" CF_PROXIED="n" TUN_PORT=""
@@ -917,7 +980,7 @@ EOF
   ok "Backhaul relay is running."
 
   local vless_url remote_for_client
-  vless_url="$(build_vless_url "$uuid" "$(hostport "$public_ip" "$listen_port")" "$pub" "$sid" "$sni" "Iran-Relay")"
+  vless_url="$(build_vless_url "$uuid" "$(hostport "$public_ip" "$listen_port")" "$suffix" "Iran-Relay")"
   if [[ -n "$DOMAIN" ]]; then
     remote_for_client="$(hostport "$DOMAIN" "$TUN_PORT")"
   else
@@ -983,8 +1046,7 @@ status_all() {
 
   if [[ -f "$CONF_DIR/foreign-exit.env" ]]; then
     echo "=== Saved: this server's Foreign exit config ==="
-    grep -v '^PRIVATE_KEY=' "$CONF_DIR/foreign-exit.env"
-    echo "(private key hidden — see $CONF_DIR/foreign-exit.env)"
+    cat "$CONF_DIR/foreign-exit.env"
     echo
   fi
   if [[ -f "$CONF_DIR/iran-relay.env" ]]; then

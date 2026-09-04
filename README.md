@@ -1,20 +1,22 @@
 # Backhaul VLESS Installer
 
-A guided, paginated installer that turns two servers into a tuned
-**VLESS + REALITY** proxy relayed through **[Backhaul](https://github.com/Musixal/Backhaul)**:
+A guided, paginated installer that relays an existing (or freshly built)
+**VLESS** proxy through **[Backhaul](https://github.com/Musixal/Backhaul)**:
 
 ```
 [ VLESS client ] --> [ Iran relay, public ] == Backhaul tunnel ==> [ Foreign server ]
                                                                         |
-                                                                  Xray VLESS+REALITY
+                                                                   VLESS inbound
                                                                   (127.0.0.1 only)
 ```
 
-The foreign server runs [Xray-core](https://github.com/XTLS/Xray-core) with a
-VLESS+REALITY inbound bound to `127.0.0.1`. The Iran server runs Backhaul and
+The foreign server runs a VLESS inbound bound to `127.0.0.1` — either one you
+already run (e.g. via 3x-ui/x-ui), or a fresh Xray-core VLESS+REALITY
+inbound the script sets up for you. The Iran server runs Backhaul and
 exposes the only public port, forwarding it through the tunnel to the
-foreign server's local Xray port. The script builds the final VLESS URL for
-you — you never hand-edit or paste one.
+foreign server's local VLESS port. The script builds the final VLESS URL
+for you: paste your inbound's share link once, and it does the rest — you
+never hand-edit a VLESS URL.
 
 ## Install
 
@@ -30,8 +32,9 @@ The menu is numbered in the order you need to run it:
 
 1. **Foreign server — option 1**: choose either
    - **I already have an inbound** (e.g. from 3x-ui/x-ui) — nothing is
-     installed or touched; you just type in its UUID, REALITY public key,
-     short ID, SNI, and local port, or
+     installed or touched; you paste its VLESS share link (any type —
+     REALITY, TLS, plain `security=none`, whatever it already uses) and
+     the script parses out what it needs, or
    - **Build a new one** — installs Xray-core and sets up VLESS+REALITY
      from scratch.
 
