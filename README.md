@@ -28,8 +28,15 @@ Run it as root on both servers.
 
 The menu is numbered in the order you need to run it:
 
-1. **Foreign server — option 1**: installs Xray, sets up VLESS+REALITY, and
-   prints a compact "bundle" string (your VLESS credentials, base64-encoded).
+1. **Foreign server — option 1**: choose either
+   - **I already have an inbound** (e.g. from 3x-ui/x-ui) — nothing is
+     installed or touched; you just type in its UUID, REALITY public key,
+     short ID, SNI, and local port, or
+   - **Build a new one** — installs Xray-core and sets up VLESS+REALITY
+     from scratch.
+
+   Either way it prints a compact "bundle" string (your VLESS credentials,
+   base64-encoded).
 2. **Iran server — option 2**: installs Backhaul, asks you to paste the
    bundle from step 1, lets you choose the tunnel transport (raw TCP, or
    WebSocket fronted by Cloudflare with your own domain), and prints the

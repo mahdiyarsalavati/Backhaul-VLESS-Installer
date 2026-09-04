@@ -191,6 +191,20 @@ valid_token() {
   [[ "$1" =~ ^[A-Za-z0-9._~-]{8,256}$ ]]
 }
 
+# prompt_nonempty <resultvar> <prompt>
+# Rejects blank input and '|' (the bundle format's field delimiter).
+prompt_nonempty() {
+  local __var="$1" prompt="$2" value
+  while true; do
+    read -r -p "${prompt}: " value
+    if [[ -n "$value" && "$value" != *'|'* ]]; then
+      printf -v "$__var" '%s' "$value"
+      return
+    fi
+    warn "This can't be empty or contain a '|' character."
+  done
+}
+
 toml_safe_host() {
   local h="$1"
   [[ -n "$h" && "$h" != *'"'* && "$h" != *'\'* && "$h" != *$'\n'* && "$h" != *$'\r'* ]]
@@ -565,77 +579,97 @@ choose_transport() {
 # ----------------------------------------------------- foreign / exit -----
 
 setup_foreign_exit() {
-  page "Foreign server — install VLESS (REALITY) exit node" "STEP 1 of 3"
+  page "Foreign server — VLESS (REALITY) exit node" "STEP 1 of 3"
   cat <<'EOF'
-This installs Xray-core (the official XTLS build, at /usr/local/bin/xray
-and /usr/local/etc/xray/config.json) and creates a VLESS + REALITY inbound
-bound to 127.0.0.1 only. It stays unreachable from the internet until you
-finish Step 2 (Iran) and Step 3 (connect this server to it).
+This server needs a VLESS + REALITY inbound that only listens on
+127.0.0.1 -- it stays unreachable from the internet until Step 2 (Iran)
+and Step 3 (connect this server) are done.
 EOF
   echo
-  press_enter
-
-  if [[ -f "$XRAY_CONF" ]]; then
-    page "Existing Xray config found" "STEP 1 of 3"
-    warn "A file already exists at ${XRAY_CONF}."
-    echo "Continuing will REPLACE it with a single VLESS+REALITY inbound."
-    echo
-    echo "If this server runs 3x-ui, x-ui, or another panel: that panel"
-    echo "manages its OWN Xray under a different path (e.g. /usr/local/x-ui/)"
-    echo "and is not touched by this — but if you'd rather reuse an inbound"
-    echo "you already created there instead of running a second Xray here,"
-    echo "cancel now and use it on the Iran server (Step 2) by choosing"
-    echo "manual entry instead of pasting a bundle: it just needs the"
-    echo "UUID, REALITY public key, short ID, SNI, and local port from your"
-    echo "existing inbound."
-    echo
-    confirm "Overwrite ${XRAY_CONF} and continue?" "N" || { info "Cancelled — nothing was changed."; return; }
-  fi
+  local mode_choice
+  select_choice mode_choice "How do you want to set this up?" \
+    "I already have a VLESS+REALITY inbound (e.g. from 3x-ui/x-ui) — just enter its details" \
+    "Build a new one for me (installs Xray-core)"
 
   install_packages
-  install_xray
 
-  page "Choose a REALITY camouflage site" "STEP 1 of 3"
-  local site_choice sni
-  select_choice site_choice "Which real HTTPS site should REALITY impersonate?" \
-    "www.microsoft.com (recommended)" \
-    "www.amazon.com" \
-    "addons.mozilla.org" \
-    "www.samsung.com" \
-    "Custom domain"
-  case "$site_choice" in
-    1) sni="www.microsoft.com" ;;
-    2) sni="www.amazon.com" ;;
-    3) sni="addons.mozilla.org" ;;
-    4) sni="www.samsung.com" ;;
-    5) while true; do
-         read -r -p "Domain (must serve TLS 1.3 + HTTP/2, e.g. a big CDN-backed site): " sni
-         toml_safe_host "$sni" && break
-         warn "Enter a plain domain name (no quotes, backslashes, or blank)."
-       done ;;
-  esac
+  local uuid priv="" pub sid sni local_port
 
-  page "Local listen port" "STEP 1 of 3"
-  echo "Xray will listen on 127.0.0.1 only — pick any free local port."
-  local local_port
-  pick_port local_port "Xray local port" "8443" any
+  if [[ "$mode_choice" == "1" ]]; then
+    page "Enter your existing inbound's details" "STEP 1 of 3"
+    cat <<'EOF'
+Nothing will be installed or changed on this server. Open the inbound in
+your panel (e.g. 3x-ui) and copy these fields. If it currently listens
+on 0.0.0.0 (publicly), change its "Listen IP" to 127.0.0.1 so traffic
+only arrives through the Iran relay tunnel you'll set up in Step 2.
+EOF
+    echo
+    prompt_nonempty uuid "Client UUID"
+    prompt_nonempty pub "REALITY public key (pbk)"
+    prompt_nonempty sid "REALITY short ID (sid)"
+    while true; do
+      read -r -p "SNI / camouflage domain (dest / serverNames): " sni
+      toml_safe_host "$sni" && break
+      warn "Enter a plain domain name (no quotes, backslashes, or blank)."
+    done
+    prompt_port local_port "Local port this inbound listens on"
+    ok "Using your existing inbound — nothing installed."
+  else
+    if [[ -f "$XRAY_CONF" ]]; then
+      page "Existing Xray config found" "STEP 1 of 3"
+      warn "A file already exists at ${XRAY_CONF}."
+      echo "Continuing will REPLACE it with a single VLESS+REALITY inbound."
+      echo
+      echo "If this server runs 3x-ui, x-ui, or another panel: that panel"
+      echo "manages its OWN Xray under a different path (e.g. /usr/local/x-ui/)"
+      echo "and is not touched by this. If this file is from an earlier run"
+      echo "of this script, it's safe to overwrite."
+      echo
+      confirm "Overwrite ${XRAY_CONF} and continue?" "N" || { info "Cancelled — nothing was changed."; return; }
+    fi
 
-  info "Generating credentials..."
-  local uuid priv pub sid
-  uuid="$("$XRAY_BIN" uuid)"
-  read -r priv pub <<< "$(xray_x25519)"
-  sid="$(openssl rand -hex 8)"
+    install_xray
 
-  write_xray_reality_config "$uuid" "$priv" "$sid" "$sni" "$local_port"
+    page "Choose a REALITY camouflage site" "STEP 1 of 3"
+    local site_choice
+    select_choice site_choice "Which real HTTPS site should REALITY impersonate?" \
+      "www.microsoft.com (recommended)" \
+      "www.amazon.com" \
+      "addons.mozilla.org" \
+      "www.samsung.com" \
+      "Custom domain"
+    case "$site_choice" in
+      1) sni="www.microsoft.com" ;;
+      2) sni="www.amazon.com" ;;
+      3) sni="addons.mozilla.org" ;;
+      4) sni="www.samsung.com" ;;
+      5) while true; do
+           read -r -p "Domain (must serve TLS 1.3 + HTTP/2, e.g. a big CDN-backed site): " sni
+           toml_safe_host "$sni" && break
+           warn "Enter a plain domain name (no quotes, backslashes, or blank)."
+         done ;;
+    esac
 
-  systemctl enable xray >/dev/null 2>&1 || true
-  systemctl restart xray
-  sleep 1
-  systemctl is-active --quiet xray || {
-    journalctl -u xray -n 30 --no-pager >&2
-    die "Xray failed to start."
-  }
-  ok "Xray VLESS+REALITY inbound is running on 127.0.0.1:${local_port}."
+    page "Local listen port" "STEP 1 of 3"
+    echo "Xray will listen on 127.0.0.1 only — pick any free local port."
+    pick_port local_port "Xray local port" "8443" any
+
+    info "Generating credentials..."
+    uuid="$("$XRAY_BIN" uuid)"
+    read -r priv pub <<< "$(xray_x25519)"
+    sid="$(openssl rand -hex 8)"
+
+    write_xray_reality_config "$uuid" "$priv" "$sid" "$sni" "$local_port"
+
+    systemctl enable xray >/dev/null 2>&1 || true
+    systemctl restart xray
+    sleep 1
+    systemctl is-active --quiet xray || {
+      journalctl -u xray -n 30 --no-pager >&2
+      die "Xray failed to start."
+    }
+    ok "Xray VLESS+REALITY inbound is running on 127.0.0.1:${local_port}."
+  fi
 
   tune_kernel
 
@@ -655,7 +689,7 @@ EOF
   chmod 600 "$CONF_DIR/foreign-exit.env"
 
   page "Foreign exit node ready" "STEP 1 of 3 — done"
-  ok "VLESS + REALITY is configured and running."
+  ok "VLESS + REALITY details are ready."
   echo
   printf "UUID:        %s\n" "$uuid"
   printf "Public key:  %s\n" "$pub"
