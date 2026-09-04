@@ -567,12 +567,30 @@ choose_transport() {
 setup_foreign_exit() {
   page "Foreign server — install VLESS (REALITY) exit node" "STEP 1 of 3"
   cat <<'EOF'
-This installs Xray-core and creates a VLESS + REALITY inbound bound to
-127.0.0.1 only — it stays unreachable from the internet until you finish
-Step 2 (Iran) and Step 3 (connect this server to it).
+This installs Xray-core (the official XTLS build, at /usr/local/bin/xray
+and /usr/local/etc/xray/config.json) and creates a VLESS + REALITY inbound
+bound to 127.0.0.1 only. It stays unreachable from the internet until you
+finish Step 2 (Iran) and Step 3 (connect this server to it).
 EOF
   echo
   press_enter
+
+  if [[ -f "$XRAY_CONF" ]]; then
+    page "Existing Xray config found" "STEP 1 of 3"
+    warn "A file already exists at ${XRAY_CONF}."
+    echo "Continuing will REPLACE it with a single VLESS+REALITY inbound."
+    echo
+    echo "If this server runs 3x-ui, x-ui, or another panel: that panel"
+    echo "manages its OWN Xray under a different path (e.g. /usr/local/x-ui/)"
+    echo "and is not touched by this — but if you'd rather reuse an inbound"
+    echo "you already created there instead of running a second Xray here,"
+    echo "cancel now and use it on the Iran server (Step 2) by choosing"
+    echo "manual entry instead of pasting a bundle: it just needs the"
+    echo "UUID, REALITY public key, short ID, SNI, and local port from your"
+    echo "existing inbound."
+    echo
+    confirm "Overwrite ${XRAY_CONF} and continue?" "N" || { info "Cancelled — nothing was changed."; return; }
+  fi
 
   install_packages
   install_xray
